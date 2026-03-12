@@ -11,7 +11,7 @@ head_camera:
   # Port to publish camera stream, e.g. zmq tcp://*:55555.  image_client.py should connect to the same port
   zmq_port : 55555
   # Set to true to enable WebRTC publishing, false to disable
-  enable_webrtc: true
+  enable_webrtc: false
   # Port for WebRTC signaling server
   webrtc_port : 60001
 
@@ -19,14 +19,14 @@ head_camera:
   #   - "opencv"    → opencv driver
   #   - "realsense" → pyrealsense2 driver
   #   - "uvc"       → pyuvc driver
-  type: uvc
+  type: realsense
 
   # Image Format
   # image resolution: [height, width]
   image_shape: [480, 1280]
   binocular: true
   # frame per second
-  fps: 60
+  fps: 30
 
   # Camera identifiers (choose one or more):
   #   - video_id: X        → /dev/videoX  (e.g. 0 → /dev/video0)
@@ -42,18 +42,18 @@ head_camera:
   #   - type "opencv":    supports video_id, serial_number, physical_path
   #   - type "uvc":       supports video_id, serial_number, physical_path
   video_id: 0
-  serial_number: 01.00.00
+  serial_number: 405622073540
   physical_path: null
 
 # =====================================================
 # Left wrist camera configuration
 # =====================================================
 left_wrist_camera:
-  enable_zmq: true
+  enable_zmq: false
   zmq_port : 55556
   enable_webrtc: false
   webrtc_port : 60002
-  type: uvc
+  type: realsense
   image_shape: [480, 640]
   binocular: false
   fps: 60
@@ -65,11 +65,11 @@ left_wrist_camera:
 # Right wrist camera configuration
 # =====================================================
 right_wrist_camera:
-  enable_zmq: true
+  enable_zmq: false
   zmq_port : 55557
   enable_webrtc: false
   webrtc_port: 60003
-  type: uvc
+  type: realsense
   image_shape: [480, 640]
   binocular: false
   fps: 60
