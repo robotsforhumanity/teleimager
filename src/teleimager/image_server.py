@@ -391,6 +391,7 @@ class RealSenseCamera(BaseCamera):
         self._serial_number = serial_number
         self._enable_depth = enable_depth
         self._latest_depth = None
+        self._rs = rs
         try:
             align_to = rs.stream.infrared
             self.align = rs.align(align_to)
@@ -398,9 +399,11 @@ class RealSenseCamera(BaseCamera):
             config = rs.config()
             config.enable_device(self._serial_number)
 
-            #config.enable_stream(rs.stream.color, self._img_shape[1], self._img_shape[0], rs.format.bgr8, self._fps)
-            config.enable_stream(rs.stream.infrared, 1, self._img_shape[1]//2, self._img_shape[0], rs.format.y8, self._fps)
-            config.enable_stream(rs.stream.infrared, 2, self._img_shape[1]//2, self._img_shape[0], rs.format.y8, self._fps)
+            ir_w = self._img_shape[1] // 2
+            ir_h = self._img_shape[0]
+            config.enable_stream(rs.stream.infrared, 1, ir_w, ir_h, rs.format.y8, self._fps)
+            config.enable_stream(rs.stream.infrared, 2, ir_w, ir_h, rs.format.y8, self._fps)
+            config.enable_stream(rs.stream.color, ir_w, ir_h, rs.format.bgr8, self._fps)
             if self._enable_depth:
                 config.enable_stream(rs.stream.depth, self._img_shape[1], self._img_shape[0], rs.format.z16, self._fps)
 
@@ -415,7 +418,6 @@ class RealSenseCamera(BaseCamera):
 
             depth_sensor = self._device.first_depth_sensor()
             depth_sensor.set_option(rs.option.emitter_enabled, 0)
-
 
             self.intrinsics = profile.get_stream(rs.stream.infrared).as_video_stream_profile().get_intrinsics()
             logger_mp.info(str(self))
@@ -444,6 +446,19 @@ class RealSenseCamera(BaseCamera):
                 "pyrealsense2 not installed. Install Intel RealSense SDK and pyrealsense2 Python bindings."
             ) from e
     
+    @staticmethod
+    def _colorize_ir(ir_gray, color_bgr):
+        """Colorize a grayscale IR image using an aligned RGB frame.
+
+        Uses the IR as luminance (Y) and takes chrominance (Cr, Cb) from
+        the color image, producing a sharp image with natural color.
+        """
+        if color_bgr is None or color_bgr.shape[:2] != ir_gray.shape[:2]:
+            return cv2.cvtColor(ir_gray, cv2.COLOR_GRAY2BGR)
+        color_ycrcb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2YCrCb)
+        color_ycrcb[:, :, 0] = ir_gray
+        return cv2.cvtColor(color_ycrcb, cv2.COLOR_YCrCb2BGR)
+
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
         aligned_frames = self.align.process(frames)
@@ -452,7 +467,7 @@ class RealSenseCamera(BaseCamera):
         if not left_frame or not right_frame:
             return None
 
-        if self._enable_depth:   
+        if self._enable_depth:
             depth_frame = aligned_frames.get_depth_frame()
             if depth_frame:
                 self._latest_depth = np.asanyarray(depth_frame.get_data())
@@ -461,17 +476,23 @@ class RealSenseCamera(BaseCamera):
 
         left_ir_numpy = np.asanyarray(left_frame.get_data())
         right_ir_numpy = np.asanyarray(right_frame.get_data())
-        full_ir_numpy = cv2.hconcat([left_ir_numpy, right_ir_numpy])
+
+        # Colorize IR images using aligned RGB
+        color_frame = aligned_frames.get_color_frame()
+        color_numpy = np.asanyarray(color_frame.get_data()) if color_frame else None
+
+        left_bgr = self._colorize_ir(left_ir_numpy, color_numpy)
+        right_bgr = self._colorize_ir(right_ir_numpy, color_numpy)
+        full_bgr = cv2.hconcat([left_bgr, right_bgr])
 
         if self._enable_webrtc:
-            full_ir_bgr = cv2.cvtColor(full_ir_numpy, cv2.COLOR_GRAY2BGR)
-            self._webrtc_buffer.write(full_ir_bgr)
+            self._webrtc_buffer.write(full_bgr)
 
         if self._enable_zmq:
-            ok, buf = cv2.imencode(".jpg", full_ir_numpy)
+            ok, buf = cv2.imencode(".jpg", full_bgr)
             if ok:
                 self._zmq_buffer.write(buf.tobytes())
-        
+
         if not self._ready.is_set():
             self._ready.set()
     
