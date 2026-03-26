@@ -1,3 +1,6 @@
+import logging_mp
+logging_mp.basicConfig(level=logging_mp.INFO)
+logger_mp = logging_mp.getLogger(__name__)
 import os
 import argparse
 import glob
@@ -13,9 +16,7 @@ import signal
 import functools
 import subprocess
 import platform
-import logging_mp
-logging_mp.basic_config(level=logging_mp.INFO)
-logger_mp = logging_mp.get_logger(__name__)
+
 
 # Resolve the absolute path of cam_config_server.yaml relative to this script
 CONFIG_PATH = os.path.join(
@@ -447,15 +448,18 @@ class RealSenseCamera(BaseCamera):
             ) from e
     
     @staticmethod
-    def _colorize_ir(ir_gray, color_bgr):
+    def _colorize_ir(ir_gray, color_bgr, blur_chroma=False):
         """Colorize a grayscale IR image using an aligned RGB frame.
 
-        Uses the IR as luminance (Y) and takes chrominance (Cr, Cb) from
-        the color image, producing a sharp image with natural color.
+        Blends the sharp IR grayscale with the color RGB to preserve IR
+        detail while adding color. The heavy blurring of chroma channels
+        hides alignment errors between the RGB and IR sensors, especially
+        on nearby objects.
         """
         if color_bgr is None or color_bgr.shape[:2] != ir_gray.shape[:2]:
             return cv2.cvtColor(ir_gray, cv2.COLOR_GRAY2BGR)
-        color_ycrcb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2YCrCb)
+        color_blurred = cv2.GaussianBlur(color_bgr, (0, 0), sigmaX=20)
+        color_ycrcb = cv2.cvtColor(color_blurred, cv2.COLOR_BGR2YCrCb)
         color_ycrcb[:, :, 0] = ir_gray
         return cv2.cvtColor(color_ycrcb, cv2.COLOR_YCrCb2BGR)
 
@@ -481,8 +485,8 @@ class RealSenseCamera(BaseCamera):
         color_frame = aligned_frames.get_color_frame()
         color_numpy = np.asanyarray(color_frame.get_data()) if color_frame else None
 
-        left_bgr = self._colorize_ir(left_ir_numpy, color_numpy)
-        right_bgr = self._colorize_ir(right_ir_numpy, color_numpy)
+        left_bgr = self._colorize_ir(left_ir_numpy, color_numpy, blur_chroma=True)
+        right_bgr = self._colorize_ir(right_ir_numpy, color_numpy, blur_chroma=True)
         full_bgr = cv2.hconcat([left_bgr, right_bgr])
 
         if self._enable_webrtc:
