@@ -405,22 +405,40 @@ class RealSenseCamera(BaseCamera):
             config.enable_stream(rs.stream.infrared, 1, ir_w, ir_h, rs.format.y8, self._fps)
             config.enable_stream(rs.stream.infrared, 2, ir_w, ir_h, rs.format.y8, self._fps)
             config.enable_stream(rs.stream.color, ir_w, ir_h, rs.format.bgr8, self._fps)
-            if self._enable_depth:
-                config.enable_stream(rs.stream.depth, self._img_shape[1], self._img_shape[0], rs.format.z16, self._fps)
+            config.enable_stream(rs.stream.depth, ir_w, ir_h, rs.format.z16, self._fps)
 
             profile = self.pipeline.start(config)
             self._device = profile.get_device()
             if self._device is None:
                 logger_mp.error('[RealSenseCamera] pipe_profile.get_device() is None .')
-            if self._enable_depth:
-                assert self._device is not None
-                depth_sensor = self._device.first_depth_sensor()
-                self.g_depth_scale = depth_sensor.get_depth_scale()
 
             depth_sensor = self._device.first_depth_sensor()
+            self._depth_scale = depth_sensor.get_depth_scale()
+            if self._enable_depth:
+                self.g_depth_scale = self._depth_scale
             depth_sensor.set_option(rs.option.emitter_enabled, 0)
 
-            self.intrinsics = profile.get_stream(rs.stream.infrared).as_video_stream_profile().get_intrinsics()
+            ir1_profile = profile.get_stream(rs.stream.infrared, 1)
+            ir2_profile = profile.get_stream(rs.stream.infrared, 2)
+            extrinsics = ir1_profile.get_extrinsics_to(ir2_profile)
+            self._stereo_baseline = abs(extrinsics.translation[0])
+            self._focal_px = ir1_profile.as_video_stream_profile().get_intrinsics().fx
+
+            self._remap_x_base = np.tile(
+                np.arange(ir_w, dtype=np.float32).reshape(1, -1), (ir_h, 1)
+            )
+            self._remap_y = np.tile(
+                np.arange(ir_h, dtype=np.float32).reshape(-1, 1), (1, ir_w)
+            )
+            self._disparity = np.zeros((ir_h, ir_w), dtype=np.float32)
+            self._map_x = np.zeros((ir_h, ir_w), dtype=np.float32)
+            self._dilate_kernel = np.ones((13, 13), np.uint8)
+
+            self.intrinsics = ir1_profile.as_video_stream_profile().get_intrinsics()
+            logger_mp.info(
+                f"[RealSenseCamera] Stereo baseline={self._stereo_baseline*1000:.1f}mm, "
+                f"focal={self._focal_px:.1f}px"
+            )
             logger_mp.info(str(self))
         except Exception as e:
             if self.pipeline:
@@ -448,20 +466,42 @@ class RealSenseCamera(BaseCamera):
             ) from e
     
     @staticmethod
-    def _colorize_ir(ir_gray, color_bgr, blur_chroma=False):
+    def _colorize_ir(ir_gray, color_bgr, chroma_sigma=20):
         """Colorize a grayscale IR image using an aligned RGB frame.
 
-        Blends the sharp IR grayscale with the color RGB to preserve IR
-        detail while adding color. The heavy blurring of chroma channels
-        hides alignment errors between the RGB and IR sensors, especially
-        on nearby objects.
+        Keeps IR as the sharp luminance channel and blurs only the
+        chrominance (Cr, Cb) from the RGB.  Human vision is far less
+        sensitive to chroma resolution, so the result looks sharp while
+        color-fringing at depth edges is suppressed.
         """
         if color_bgr is None or color_bgr.shape[:2] != ir_gray.shape[:2]:
             return cv2.cvtColor(ir_gray, cv2.COLOR_GRAY2BGR)
-        color_blurred = cv2.GaussianBlur(color_bgr, (0, 0), sigmaX=20)
-        color_ycrcb = cv2.cvtColor(color_blurred, cv2.COLOR_BGR2YCrCb)
-        color_ycrcb[:, :, 0] = ir_gray
-        return cv2.cvtColor(color_ycrcb, cv2.COLOR_YCrCb2BGR)
+        ycrcb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2YCrCb)
+        ycrcb[:, :, 0] = ir_gray
+        ycrcb[:, :, 1] = cv2.GaussianBlur(ycrcb[:, :, 1], (0, 0), sigmaX=chroma_sigma)
+        ycrcb[:, :, 2] = cv2.GaussianBlur(ycrcb[:, :, 2], (0, 0), sigmaX=chroma_sigma)
+        return cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
+    def _reproject_color_to_right(self, color_left, depth_frame):
+        """Shift color aligned to left-IR into the right-IR perspective
+        using depth-based horizontal disparity and cv2.remap."""
+        if color_left is None or depth_frame is None or self._stereo_baseline == 0:
+            return color_left
+
+        depth = np.asanyarray(depth_frame.get_data()).astype(np.float32)
+        np.multiply(depth, self._depth_scale, out=depth)
+
+        self._disparity[:] = 0
+        valid = depth > 0.10
+        self._disparity[valid] = self._focal_px * self._stereo_baseline / depth[valid]
+
+        dilated = cv2.dilate(self._disparity, self._dilate_kernel)
+        np.where(self._disparity > 0, self._disparity, dilated, out=self._disparity)
+        cv2.GaussianBlur(self._disparity, (0, 0), sigmaX=5, dst=self._disparity)
+
+        np.add(self._remap_x_base, self._disparity, out=self._map_x)
+        return cv2.remap(color_left, self._map_x, self._remap_y,
+                         cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
 
     def _update_frame(self):
         frames = self.pipeline.wait_for_frames()
@@ -471,8 +511,8 @@ class RealSenseCamera(BaseCamera):
         if not left_frame or not right_frame:
             return None
 
+        depth_frame = aligned_frames.get_depth_frame()
         if self._enable_depth:
-            depth_frame = aligned_frames.get_depth_frame()
             if depth_frame:
                 self._latest_depth = np.asanyarray(depth_frame.get_data())
             else:
@@ -481,12 +521,15 @@ class RealSenseCamera(BaseCamera):
         left_ir_numpy = np.asanyarray(left_frame.get_data())
         right_ir_numpy = np.asanyarray(right_frame.get_data())
 
-        # Colorize IR images using aligned RGB
         color_frame = aligned_frames.get_color_frame()
-        color_numpy = np.asanyarray(color_frame.get_data()) if color_frame else None
+        color_left = np.asanyarray(color_frame.get_data()) if color_frame else None
+        try:
+            color_right = self._reproject_color_to_right(color_left, depth_frame)
+        except Exception:
+            color_right = color_left
 
-        left_bgr = self._colorize_ir(left_ir_numpy, color_numpy, blur_chroma=True)
-        right_bgr = self._colorize_ir(right_ir_numpy, color_numpy, blur_chroma=True)
+        left_bgr = self._colorize_ir(left_ir_numpy, color_left, chroma_sigma=18)
+        right_bgr = self._colorize_ir(right_ir_numpy, color_right, chroma_sigma=25)
         full_bgr = cv2.hconcat([left_bgr, right_bgr])
 
         if self._enable_webrtc:
@@ -762,7 +805,7 @@ class ImageServer:
                 try:
                     camera._update_frame()
                 except Exception as e:
-                    logger_mp.error(f"[Image Server] Error updating frame for {cam_topic} camera")
+                    logger_mp.error(f"[Image Server] Error updating frame for {cam_topic} camera: {e}")
                     self._stop_event.set()
                     break
                 next_frame_time += interval
