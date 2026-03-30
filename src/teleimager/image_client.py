@@ -3,7 +3,7 @@ import time
 from . import zmq_msg
 
 import logging_mp
-logger_mp = logging_mp.get_logger(__name__, level=logging_mp.INFO)
+logger_mp = logging_mp.getLogger(__name__)#, level=logging_mp.INFO)
 
 class ImageClient:
     def __init__(self, host="192.168.123.164", request_port=60000):

@@ -27,7 +27,7 @@ import yaml
 import os
 import time
 import logging_mp
-logger_mp = logging_mp.get_logger(__name__, level=logging_mp.INFO)
+logger_mp = logging_mp.getLogger(__name__)#, level=logging_mp.INFO)
 
 # ========================================================
 # Utility tools

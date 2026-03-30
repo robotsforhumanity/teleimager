@@ -31,7 +31,7 @@ CERT_PEM_PATH = CERT_PEM_PATH.resolve()
 KEY_PEM_PATH = KEY_PEM_PATH.resolve()
 
 import logging_mp
-logger_mp = logging_mp.get_logger(__name__)
+logger_mp = logging_mp.getLogger(__name__)
 
 
 # ========================================================
