@@ -23,7 +23,7 @@ head_camera:
 
   # Image Format
   # image resolution: [height, width]
-  image_shape: [480, 1280]
+  image_shape: [480, 640]
   binocular: true
   # frame per second
   fps: 30
@@ -42,7 +42,7 @@ head_camera:
   #   - type "opencv":    supports video_id, serial_number, physical_path
   #   - type "uvc":       supports video_id, serial_number, physical_path
   video_id: 0
-  serial_number: 405622073540
+  serial_number: 408322070958
   physical_path: null
 
 # =====================================================
